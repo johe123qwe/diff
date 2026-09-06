@@ -1,3 +1,7 @@
 RewriteEngine On
+
+# 禁止从浏览器访问 .git 目录（部署方式改为 git pull 后必须加）
+RewriteRule ^\.git(/|$) - [F,L]
+
 RewriteCond %{REQUEST_URI} !data/
 RewriteRule ^([^/]*\.html) data/$1 [L]
