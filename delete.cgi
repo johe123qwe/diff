@@ -1,0 +1,154 @@
+#!/usr/bin/perl
+
+# テキスト比較ツール difff《ﾃﾞｭﾌﾌ》： 2つのテキストの差分をハイライト表示するCGI
+#
+# 比較するテキストとして、HTTPリクエストから sequenceA および sequenceB を取得し、
+# diffコマンドを用いて文字ごと（英単語は単語ごと）に比較し差分をハイライト表示する
+#
+# 2015-06-11 Yuki Naito (@meso_cacase) difff.plをもとにdelete.cgiを作成
+
+use warnings ;
+use strict ;
+use Digest::MD5 qw(md5_hex) ;
+
+my $url = './' ;
+
+# HTTPリクエストを取得
+my %query = get_query_parameters() ;
+
+# 削除パスワードのhashを取得。ファイル名の一部となっている
+my $md5 = md5_hex($query{'passwd'}) ;
+(my $filename = $ENV{'HTTP_REFERER'}) =~ s{.*/}{} ;
+
+# 削除を実行
+(-f "data/${md5}_${filename}") and unlink "data/${md5}_${filename}"
+	or print_html("无法删除页面，请确认密码 (1)") ;
+(-l "data/$filename") and unlink "data/$filename"
+	or print_html("无法删除页面，请确认密码 (2)") ;
+
+# 結果を表示
+print_html("页面已删除") ;
+
+exit ;
+
+# ====================
+sub get_query_parameters {  # CGIが受け取ったパラメータの処理
+my $buffer = '' ;
+if (defined $ENV{'REQUEST_METHOD'} and
+	$ENV{'REQUEST_METHOD'} eq 'POST' and
+	defined $ENV{'CONTENT_LENGTH'}
+){
+	eval 'read(STDIN, $buffer, $ENV{"CONTENT_LENGTH"})' or
+	print_html('ERROR : get_query_parameters() : read failed') ;
+} elsif (defined $ENV{'QUERY_STRING'}){
+	$buffer = $ENV{'QUERY_STRING'} ;
+}
+length $buffer > 5000000 and print_html('ERROR : input too large') ;
+my %query ;
+my @query = split /&/, $buffer ;
+foreach (@query){
+	my ($name, $value) = split /=/ ;
+	if (defined $name and defined $value){
+		$value =~ tr/+/ / ;
+		$value =~ s/%([a-fA-F0-9][a-fA-F0-9])/pack('C', hex($1))/eg ;
+		$name  =~ s/%([a-fA-F0-9][a-fA-F0-9])/pack('C', hex($1))/eg ;
+		$query{$name} = $value ;
+	}
+}
+return %query ;
+} ;
+# ====================
+sub print_html {  # HTMLを出力
+my $message = $_[0] // '' ;
+
+#- ▼ HTML出力
+my $html = <<"--EOS--" ;
+<!DOCTYPE HTML PUBLIC '-//W3C//DTD HTML 4.01 Transitional//EN'>
+<html lang=zh-CN>
+
+<head>
+<meta http-equiv='Content-Type' content='text/html; charset=utf-8'>
+<meta http-equiv='Content-Style-Type' content='text/css'>
+<meta name='author' content='Yuki Naito'>
+<title>difff - 文本比较</title>
+<script type='text/javascript'>
+<!--
+	var THEME_DARK  = '深色主题';
+	var THEME_LIGHT = '浅色主题';
+
+	function applyTheme(dark) {
+		document.body.className = dark ? 'dark' : '';
+		var btn = document.getElementById('themebtn');
+		if (btn) { btn.value = dark ? THEME_LIGHT : THEME_DARK }
+	}
+	function toggleTheme() {
+		var dark = (document.body.className != 'dark');
+		applyTheme(dark);
+		try { localStorage.setItem('difffTheme', dark ? 'dark' : 'light') } catch (e) {}
+	}
+	function initTheme() {
+		var saved = '';
+		try { saved = localStorage.getItem('difffTheme') } catch (e) {}
+		applyTheme(saved == 'dark');
+	}
+//-->
+</script>
+<style type='text/css'>
+<!--
+	* { font-family:verdana,arial,helvetica,sans-serif }
+	p { font-size:10pt }
+	.message {
+		width:500px;
+		padding:10pt;
+		border:dotted 1px #8c93ba;
+	}
+	a  { color:#3366CC }
+	.k { color:black; text-decoration:none }
+	body { background:#FFFFFF; color:#000000 }
+	body.dark { background:#1E1E1E; color:#DDDDDD }
+	body.dark a { color:#6FB3FF }
+	body.dark .k { color:#DDDDDD }
+	body.dark font { color:#999999 }
+	body.dark hr { border-color:#444444; background:#444444; color:#444444 }
+	body.dark .message { border-color:#666688 }
+-->
+</style>
+</head>
+
+<body onload='initTheme()'>
+<script type='text/javascript'>initTheme();</script>
+
+<div id=top style='border-top:5px solid #00BBFF; padding-top:10px'>
+<font size=5>
+	<a class=k href='$url'>
+	文本比较工具 <b>difff</b></a></font><!--
+--><font size=3>ver.6.1</font>
+&emsp;
+<font size=1 style='vertical-align:16px'>
+	<a href='${url}en/'>English</a> |
+	简体中文
+</font>
+&emsp;
+<font size=1 style='vertical-align:16px'>
+<a href='${url}v5/'>旧版本 (ver.5)</a>
+</font>
+&emsp;
+	<input type=button id=themebtn value='深色主题' onclick='toggleTheme()'
+		style='font-size:8pt; vertical-align:14px'>
+<hr><!-- ________________________________________ -->
+</div>
+
+<p class=message><b>消息：</b><br>$message</p>
+
+<p><a href='$url'>返回 difff 首页</a></p>
+
+</body>
+</html>
+--EOS--
+
+print "Content-type: text/html; charset=utf-8\n\n$html" ;
+#- ▲ HTML出力
+
+exit ;
+} ;
+# ====================
