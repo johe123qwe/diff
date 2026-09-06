@@ -678,6 +678,7 @@ my $html = <<"--EOS--" ;
 		color:#DDDDDD;
 		border:solid 1px #555555;
 	}
+	body.dark table { color:#DDDDDD }  /* 互換モードでは table が body から色を継承しない */
 	body.dark td { border-left-color:#444444; border-right-color:#444444 }
 	body.dark td.skip { background:#262626; color:#888888 }
 	body.dark #diffnav { background:#2A2A2A; border-bottom-color:#444444 }
