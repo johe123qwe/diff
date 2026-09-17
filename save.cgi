@@ -40,11 +40,19 @@ utf8::decode($sequenceA) ;  # utf8フラグを有効にする
 my $sequenceB = $query{'sequenceB'} // '' ;
 utf8::decode($sequenceB) ;  # utf8フラグを有効にする
 
+# 「忽略空行」の指定
+my $ignoreblank = $query{'ignoreblank'} ? 1 : 0 ;
+
 # 両方とも空欄のときはトップページを表示
 $sequenceA eq '' and $sequenceB eq '' and print_html() ;
 
-my @a_split = split_text( escape_char($sequenceA) ) ;
-my @b_split = split_text( escape_char($sequenceB) ) ;
+# 比較には空行を除いた写しを使い、
+# フォームには入力されたままのテキストを残す
+my $compareA = $ignoreblank ? strip_blank($sequenceA) : $sequenceA ;
+my $compareB = $ignoreblank ? strip_blank($sequenceB) : $sequenceB ;
+
+my @a_split = split_text( escape_char($compareA) ) ;
+my @b_split = split_text( escape_char($compareB) ) ;
 
 # トークン数が多すぎる場合はここで打ち切る。
 # FIFOを作る前に判定しないと、書き込み側の子プロセスが残ってしまう
@@ -200,8 +208,8 @@ foreach (0..$par-1){
 }
 
 #- ▽ 文字数をカウントしてtableに付加
-my ($count1_A, $count2_A, $count3_A, $wcount_A) = count_char($sequenceA) ;
-my ($count1_B, $count2_B, $count3_B, $wcount_B) = count_char($sequenceB) ;
+my ($count1_A, $count2_A, $count3_A, $wcount_A) = count_char($compareA) ;
+my ($count1_B, $count2_B, $count3_B, $wcount_B) = count_char($compareB) ;
 
 my $counts = <<"--EOS--" ;
 <table id=charcount cellspacing=0>
@@ -323,6 +331,13 @@ $text =~ s/\n/<\$>/g ;  # もともとの改行を <$> に変換して処理
 # 先頭から1トークンずつ s/// で削るとテキスト長の2乗に比例して遅くなるため、
 # \G で順にマッチさせて一度に取り出す（大きなテキストへの対応）
 return $text =~ /\G([a-z]+|<\$>|&\#?\w+;|.)/gs ;
+} ;
+# ====================
+sub strip_blank {  # 空行（空白だけの行を含む）を取り除く
+my $text = $_[0] // '' ;
+my $lf = ($text =~ /\n\z/) ? "\n" : '' ;  # 末尾の改行は保つ
+my @line = grep { /\S/ } split /\n/, $text, -1 ;
+return @line ? join("\n", @line) . $lf : '' ;
 } ;
 # ====================
 sub balance_tag {  # 行をまたぐタグを、行ごとに閉じて開き直す
@@ -901,7 +916,9 @@ my $html = <<"--EOS--" ;
 </tr>
 </table>
 
-<p><input type=submit value='比较'></p>
+<p><input type=submit value='比较'>
+&emsp;<input type=checkbox name=ignoreblank id=ignoreblank value=1@{[$ignoreblank ? ' checked' : '']}><!--
+--><label for=ignoreblank>忽略空行</label></p>
 </form>
 </div>
 
