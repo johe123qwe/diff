@@ -23,6 +23,16 @@ my $url = 'https://diff.1010822.xyz/' ;
 my $diffcmd = '/usr/bin/diff' ;  # diffコマンドのパスを指定
 my $fifodir = '/tmp' ;           # FIFOを作成するディレクトリを指定
 
+# 大きなテキストへの対応
+# 処理時間もメモリもトークン数にほぼ比例する。両側がまったく違うテキストという
+# 最悪ケースで、1トークンあたり約1.1KBのメモリと約18マイクロ秒を見込む
+# （60万トークンで約11秒／約670MB）。サーバの空きメモリに合わせて調整する
+my $maxtoken = 500000 ;          # 片側あたりの最大トークン数
+# $maxrequest はメモリの歯止めも兼ねる。$maxtoken を大きくするときは、
+# UTF-8の日本語・中国語はURLエンコードで1文字9バイトになる点に注意
+my $maxrequest = 20000000 ;      # 受け取るリクエストの最大バイト数
+my $minimallimit = 30000 ;       # これを超えるトークン数では diff -d を使わない
+
 binmode STDOUT, ':utf8' ;        # 標準出力をUTF-8エンコード
 binmode STDERR, ':utf8' ;        # 標準エラー出力をUTF-8エンコード
 
@@ -38,13 +48,19 @@ utf8::decode($sequenceB) ;  # utf8フラグを有効にする
 # 両方とも空欄のときはトップページを表示
 $sequenceA eq '' and $sequenceB eq '' and print_html() ;
 
-my $fifopath_a = "$fifodir/difff.$$.A" ;  # $$はプロセスID
 my @a_split = split_text( escape_char($sequenceA) ) ;
+my @b_split = split_text( escape_char($sequenceB) ) ;
+
+# トークン数が多すぎる場合はここで打ち切る。
+# FIFOを作る前に判定しないと、書き込み側の子プロセスが残ってしまう
+(@a_split > $maxtoken or @b_split > $maxtoken) and
+	print_html("ERROR : 文本太长，无法比较（每侧最多约 $maxtoken 个字 / 词）。请缩短后再试。") ;
+
+my $fifopath_a = "$fifodir/difff.$$.A" ;  # $$はプロセスID
 my $a_split = join("\n", @a_split) . "\n" ;
 fifo_send($a_split, $fifopath_a) ;
 
 my $fifopath_b = "$fifodir/difff.$$.B" ;  # $$はプロセスID
-my @b_split = split_text( escape_char($sequenceB) ) ;
 my $b_split = join("\n", @b_split) . "\n" ;
 fifo_send($b_split, $fifopath_b) ;
 # ▲ HTTPリクエストからクエリを取得し整形してFIFOに送る
@@ -52,9 +68,73 @@ fifo_send($b_split, $fifopath_b) ;
 # ▼ diffコマンドの実行
 (-e $diffcmd) or print_html("ERROR : $diffcmd : not found") ;
 (-x $diffcmd) or print_html("ERROR : $diffcmd : not executable") ;
-my @diffout = `$diffcmd -d $fifopath_a $fifopath_b` ;
+# diff -d は最小の差分を探すため、大きな入力では極端に遅くなる。
+# トークン数が多いときは -d を外し、現実的な時間で結果を返す
+my @diffout = do {
+	my $n = (@a_split > @b_split) ? scalar @a_split : scalar @b_split ;
+	my $opt = ($n > $minimallimit) ? '' : '-d' ;
+	`$diffcmd $opt $fifopath_a $fifopath_b` ;
+} ;
 my @diffsummary = grep /(^[^<>-]|<\$>)/, @diffout ;
 # ▲ diffコマンドの実行
+
+# ▼ 1列表示用の差分ストリームを生成
+# @a_split / @b_split にタグを埋め込む前に実行する必要がある
+my @merged ;       # [$type, $num, $text]  $type: '=' 共通 / '-' 削除 / '+' 追加
+my $m_pos   = 0 ;  # @a_split のうち共通部分として取り込み済みの位置
+my $m_count = 0 ;  # 差分の箇所数（$diffcount と同じ順序で採番）
+
+foreach (@diffsummary){
+	if ($_ =~ /^((\d+),)?(\d+)c(\d+)(,(\d+))?$/){       # 置換している場合
+		my $ae = $3 || 0 ; my $as = $2 || $ae ;
+		my $bs = $4 || 0 ; my $be = $6 || $bs ;
+		$m_count ++ ;
+		merged_equal($as - 1) ;
+		merged_diff('-', $m_count, \@a_split, $as - 1, $ae - 1) ;
+		merged_diff('+', $m_count, \@b_split, $bs - 1, $be - 1) ;
+		$m_pos = $ae ;
+	} elsif ($_ =~ /^((\d+),)?(\d+)d(\d+)(,(\d+))?$/){  # 欠失している場合
+		my $ae = $3 || 0 ; my $as = $2 || $ae ;
+		$m_count ++ ;
+		merged_equal($as - 1) ;
+		merged_diff('-', $m_count, \@a_split, $as - 1, $ae - 1) ;
+		$m_pos = $ae ;
+	} elsif ($_ =~ /^((\d+),)?(\d+)a(\d+)(,(\d+))?$/){  # 挿入している場合
+		my $ae = $3 || 0 ;
+		my $bs = $4 || 0 ; my $be = $6 || $bs ;
+		$m_count ++ ;
+		merged_equal($ae) ;
+		merged_diff('+', $m_count, \@b_split, $bs - 1, $be - 1) ;
+		$m_pos = $ae ;
+	}
+}
+merged_equal(scalar @a_split) ;
+
+my $merged_text = '' ;
+my %merged_seen ;
+foreach my $seg (@merged){
+	my ($type, $num, $text) = @$seg ;
+	if ($type eq '='){
+		$merged_text .= $text ;
+		next ;
+	}
+	my $mark = $merged_seen{$num} ++ ? '' : "<span class=dm id=M$num></span>" ;
+	$merged_text .= ($type eq '-') ?
+		"$mark<del>$text</del>" : "$mark<ins>$text</ins>" ;
+}
+
+# 「只显示有差异的行」を1列表示でも使えるよう、1行ずつ<span>に入れる。
+# 行をまたぐ<del>/<ins>は行ごとに閉じて開き直す
+my @merged_line = split /(?<=<\$>)/, $merged_text ;
+balance_tag(\@merged_line, 'del') ;
+balance_tag(\@merged_line, 'ins') ;
+
+my $merged_html = '' ;
+foreach my $line (@merged_line){
+	$line =~ s/<\$>/\n/g ;  # <$> を本来の改行に戻す（表示は white-space:pre-wrap）
+	$merged_html .= "<span class=ml>$line</span>" ;
+}
+# ▲ 1列表示用の差分ストリームを生成
 
 # ▼ 差分の検出とHTMLタグの埋め込み
 my ($a_start, $a_end, $b_start, $b_end) = (0, 0, 0, 0) ;
@@ -100,12 +180,13 @@ foreach (@diffsummary){  # 異なる部分をハイライト表示
 my $a_final = join '', @a_split ;
 my $b_final = join '', @b_split ;
 
-# 変更箇所が<td>をまたぐ場合の処理、該当箇所がなくなるまで繰り返し適用
-while ( $a_final =~ s{(<em>[^<>]*)<\$>(([^<>]|<\$>)*</em>)}{$1</em><\$><em>$2}g ){}
-while ( $b_final =~ s{(<em>[^<>]*)<\$>(([^<>]|<\$>)*</em>)}{$1</em><\$><em>$2}g ){}
-
 my @a_final = split /<\$>/, $a_final ;
 my @b_final = split /<\$>/, $b_final ;
+
+# 変更箇所が<td>をまたぐ場合の処理、行ごとに<em>を閉じ直す
+# （正規表現の繰り返しで処理すると、大きな差分で再帰の上限に達するため）
+balance_tag(\@a_final, 'em') ;
+balance_tag(\@b_final, 'em') ;
 
 my $par = (@a_final > @b_final) ? @a_final : @b_final ;
 
@@ -127,7 +208,8 @@ foreach (0..$par-1){
 my ($count1_A, $count2_A, $count3_A, $wcount_A) = count_char($sequenceA) ;
 my ($count1_B, $count2_B, $count3_B, $wcount_B) = count_char($sequenceB) ;
 
-$table .= <<"--EOS--" ;
+my $counts = <<"--EOS--" ;
+<table id=charcount cellspacing=0>
 <tr>
 	<td><font color=gray>
 		字符数: $count1_A<br>
@@ -142,6 +224,7 @@ $table .= <<"--EOS--" ;
 		词数: $wcount_B
 	</font></td>
 </tr>
+</table>
 --EOS--
 #- △ 文字数をカウントしてtableに付加
 
@@ -154,6 +237,8 @@ my $navbar = $diffcount ?
 <input type=button value='下一处 &#9654;' onclick='gotoDiff(1)'>
 &emsp;<input type=checkbox id=onlydiff onclick='toggleOnlyDiff(this)'><!--
 --><label for=onlydiff>只显示有差异的行</label>
+&emsp;<input type=checkbox id=mergeview onclick='toggleMerge(this)'><!--
+--><label for=mergeview>合并为一列</label>
 <font color=gray size=1>&emsp;也可以按 n / p 键跳转</font>
 </div>
 " :
@@ -163,11 +248,15 @@ my $navbar = $diffcount ?
 " ;
 #- △ 差分の総数と移動ボタンを生成
 
+my $merged_block = $diffcount ?
+"<div id=merged style='display:none'><div id=mergedhint><font color=gray size=1>红色为删除，绿色为新增</font></div><div id=mergedtext>$merged_html</div></div>
+" : '' ;
+
 my $message = <<"--EOS--" ;
 <div id=result>
-$navbar<table cellspacing=0>
+$navbar<table id=difftable cellspacing=0>
 $table</table>
-
+$merged_block$counts
 <p>
 	<input type=button id=hide value='仅显示结果 (便于打印)' onclick='hideForm()'> |
 	<input type=radio name=color value=1 onclick='setColor1()' checked>
@@ -221,7 +310,7 @@ if (defined $ENV{'REQUEST_METHOD'} and
 } elsif (defined $ENV{'QUERY_STRING'}){
 	$buffer = $ENV{'QUERY_STRING'} ;
 }
-length $buffer > 5000000 and print_html('ERROR : input too large') ;
+length $buffer > $maxrequest and print_html('ERROR : input too large') ;
 my %query ;
 my @query = split /&/, $buffer ;
 foreach (@query){
@@ -239,11 +328,37 @@ return %query ;
 sub split_text {  # 比較する単位ごとに文字列を分割してリストに格納
 my $text = join('', @_) // '' ;
 $text =~ s/\n/<\$>/g ;  # もともとの改行を <$> に変換して処理
-my @text ;
-while ($text =~ s/^([a-z]+|<\$>|&\#?\w+;|.)//){
-	push @text, $1 ;
+# 先頭から1トークンずつ s/// で削るとテキスト長の2乗に比例して遅くなるため、
+# \G で順にマッチさせて一度に取り出す（大きなテキストへの対応）
+return $text =~ /\G([a-z]+|<\$>|&\#?\w+;|.)/gs ;
+} ;
+# ====================
+sub balance_tag {  # 行をまたぐタグを、行ごとに閉じて開き直す
+my ($ref, $tag) = @_ ;
+my $open = 0 ;
+foreach my $line (@{$ref}){
+	$open and $line = "<$tag>" . $line ;
+	my $o = () = $line =~ /<$tag>/g ;
+	my $c = () = $line =~ m{</$tag>}g ;
+	$open = ($o > $c) ? 1 : 0 ;
+	$open and $line .= "</$tag>" ;
 }
-return @text ;
+} ;
+# ====================
+sub merged_equal {  # 1列表示: @a_split の指定位置までを共通部分として取り込む
+my $upto = $_[0] // 0 ;
+($upto > scalar @a_split) and $upto = scalar @a_split ;
+($upto > $m_pos) or return ;
+push @merged, ['=', 0, join('', map { $_ // '' } @a_split[$m_pos .. $upto - 1])] ;
+$m_pos = $upto ;
+} ;
+# ====================
+sub merged_diff {  # 1列表示: 削除または追加された部分を取り込む
+my ($type, $num, $ref, $from, $to) = @_ ;
+($from < 0) and $from = 0 ;
+($to > $#{$ref}) and $to = $#{$ref} ;
+($from > $to) and return ;
+push @merged, [$type, $num, join('', map { $_ // '' } @{$ref}[$from .. $to])] ;
 } ;
 # ====================
 sub fifo_send {  # usage: fifo_send($text, $path) ;
@@ -422,13 +537,15 @@ my $html = <<"--EOS--" ;
 			document.getElementById('hide').value = '显示全部';
 		}
 	}
-	var diffs   = [];
-	var diffIdx = -1;
+	var diffs    = [];   // 2列表示の差分
+	var mdiffs   = [];   // 1列表示の差分
+	var diffIdx  = -1;
+	var mergedOn = false;
+
+	function curDiffs() { return mergedOn ? mdiffs : diffs }
 
 	function initDiffNav() {
-		var result = document.getElementById('result');
-		if (!result) { return }
-		var table = result.getElementsByTagName('table')[0];
+		var table = document.getElementById('difftable');
 		if (!table) { return }
 		var byNum = {};
 		var cur   = [null, null];
@@ -470,13 +587,14 @@ my $html = <<"--EOS--" ;
 		}
 	}
 	function showDiff(k) {
-		if (!diffs.length) { return }
-		if (diffIdx > -1) { diffOutline(diffs[diffIdx], '') }
+		var list = curDiffs();
+		if (!list.length || !list[k]) { return }
+		if (diffIdx > -1 && list[diffIdx]) { diffOutline(list[diffIdx], '') }
 		diffIdx = k;
-		diffOutline(diffs[k], '2px solid #FF6600');
+		diffOutline(list[k], '2px solid #FF6600');
 		var pos = document.getElementById('diffpos');
-		if (pos) { pos.innerHTML = (k + 1) + ' / ' + diffs.length }
-		var el = diffs[k].topEm || diffs[k].mark;
+		if (pos) { pos.innerHTML = (k + 1) + ' / ' + list.length }
+		var el = list[k].topEm || list[k].mark;
 		var y  = 0;
 		while (el) { y += el.offsetTop; el = el.offsetParent }
 		var h = window.innerHeight || document.documentElement.clientHeight || 500;
@@ -484,11 +602,56 @@ my $html = <<"--EOS--" ;
 		window.scrollTo(0, (y > 0) ? y : 0);
 	}
 	function gotoDiff(step) {
-		if (!diffs.length) { return }
+		var list = curDiffs();
+		if (!list.length) { return }
 		var k = diffIdx + step;
-		if (k < 0) { k = diffs.length - 1 }
-		if (k > diffs.length - 1) { k = 0 }
+		if (k < 0) { k = list.length - 1 }
+		if (k > list.length - 1) { k = 0 }
 		showDiff(k);
+	}
+	function initMergedNav() {  // 1列表示の差分を集めてナビゲーションに使う
+		var m = document.getElementById('merged');
+		if (!m) { return }
+		var nodes = m.getElementsByTagName('*');
+		var cur   = null;
+		for (var i = 0; i < nodes.length; i++) {
+			var el = nodes[i];
+			if (el.className == 'dm') {
+				cur = { num:parseInt(el.id.substring(1), 10), ems:[], mark:el, topEm:null };
+				mdiffs.push(cur);
+			} else if (cur) {
+				var tag = el.tagName.toLowerCase();
+				if (tag == 'del' || tag == 'ins') {
+					cur.ems.push(el);
+					if (!cur.topEm) { cur.topEm = el }
+				}
+			}
+		}
+		for (var k = 0; k < mdiffs.length; k++) {
+			for (var j = 0; j < mdiffs[k].ems.length; j++) {
+				mdiffs[k].ems[j].onclick = diffClick(k);
+				mdiffs[k].ems[j].style.cursor = 'pointer';
+			}
+		}
+	}
+	function toggleMerge(box) {  // 2列表示と1列表示を切り替える
+		var m = document.getElementById('merged');
+		var t = document.getElementById('difftable');
+		if (!m || !t) { return }
+		if (box.checked && !mdiffs.length) { initMergedNav() }
+		var prev = curDiffs();
+		if (diffIdx > -1 && prev[diffIdx]) { diffOutline(prev[diffIdx], '') }
+		diffIdx  = -1;
+		mergedOn = box.checked;
+		m.style.display = mergedOn ? 'block' : 'none';
+		t.style.display = mergedOn ? 'none'  : '';
+		// 切り替え先のビューにも「只显示有差异的行」の状態を反映する
+		var only  = document.getElementById('onlydiff');
+		var built = mergedOn ? mergedSkips : tableSkips;
+		if (only && (only.checked || built)) { toggleOnlyDiff(only) }
+		var pos = document.getElementById('diffpos');
+		if (pos) { pos.innerHTML = '- / ' + curDiffs().length }
+		if (curDiffs().length) { document.onkeydown = diffKey }
 	}
 	function diffKey(e) {
 		e = e || window.event;
@@ -504,58 +667,91 @@ my $html = <<"--EOS--" ;
 	var SKIP_TEXT_A = '&hellip;&emsp;已隐藏 ';
 	var SKIP_TEXT_B = ' 行相同内容&emsp;&hellip;';
 	var SKIP_HINT   = '点击展开这些行';
-	var skipRows  = null;
-	var plainRows = null;
+	var tableSkips  = null;   // 2列表示分
+	var mergedSkips = null;   // 1列表示分
 
 	function toggleOnlyDiff(box) {
-		var result = document.getElementById('result');
-		if (!result) { return }
-		var table = result.getElementsByTagName('table')[0];
-		if (!table) { return }
-		if (!plainRows) { buildSkipRows(table) }
-		for (var i = 0; i < plainRows.length; i++) {
-			plainRows[i].style.display = box.checked ? 'none' : '';
+		var v = mergedOn ? mergedSkipData() : tableSkipData();
+		if (!v) { return }
+		for (var i = 0; i < v.plain.length; i++) {
+			v.plain[i].style.display = box.checked ? 'none' : '';
 		}
-		for (var j = 0; j < skipRows.length; j++) {
-			skipRows[j].style.display = box.checked ? '' : 'none';
+		for (var j = 0; j < v.skip.length; j++) {
+			v.skip[j].style.display = box.checked ? '' : 'none';
 		}
 	}
-	function buildSkipRows(table) {
-		plainRows = [];
-		skipRows  = [];
+	function tableSkipData() {
+		if (tableSkips) { return tableSkips }
+		var table = document.getElementById('difftable');
+		if (!table) { return null }
 		var rows = [];
 		for (var i = 0; i < table.rows.length; i++) { rows.push(table.rows[i]) }
-		var last = rows.length - 1;
-		var run  = [];
-		for (var k = 0; k < last; k++) {
-			if (rows[k].getElementsByTagName('em').length) {
-				addSkipRow(rows[k], run);
-				run = [];
-			} else {
-				run.push(rows[k]);
-			}
-		}
-		if (last > -1) { addSkipRow(rows[last], run) }
+		tableSkips = buildSkips(rows, hasEm, newSkipRow);
+		return tableSkips;
 	}
-	function addSkipRow(before, run) {
-		if (!run.length) { return }
-		for (var i = 0; i < run.length; i++) { plainRows.push(run[i]) }
+	function mergedSkipData() {
+		if (mergedSkips) { return mergedSkips }
+		var box = document.getElementById('mergedtext');
+		if (!box) { return null }
+		var lines = [];
+		var kids  = box.childNodes;
+		for (var i = 0; i < kids.length; i++) {
+			if (kids[i].className == 'ml') { lines.push(kids[i]) }
+		}
+		mergedSkips = buildSkips(lines, hasDelIns, newSkipLine);
+		return mergedSkips;
+	}
+	function hasEm(el) { return el.getElementsByTagName('em').length }
+	function hasDelIns(el) {
+		return el.getElementsByTagName('del').length +
+		       el.getElementsByTagName('ins').length;
+	}
+	function newSkipRow(n) {
 		var td = document.createElement('td');
 		td.colSpan   = 2;
 		td.className = 'skip';
-		td.innerHTML = SKIP_TEXT_A + run.length + SKIP_TEXT_B;
-		td.title     = SKIP_HINT;
+		td.innerHTML = SKIP_TEXT_A + n + SKIP_TEXT_B;
 		var tr = document.createElement('tr');
 		tr.appendChild(td);
-		tr.style.display = 'none';
-		tr.onclick = skipClick(tr, run);
-		before.parentNode.insertBefore(tr, before);
-		skipRows.push(tr);
+		return tr;
 	}
-	function skipClick(tr, run) {
+	function newSkipLine(n) {
+		var div = document.createElement('div');
+		div.className = 'mskip';
+		div.innerHTML = SKIP_TEXT_A + n + SKIP_TEXT_B;
+		return div;
+	}
+	function buildSkips(items, hasDiff, newSkip) {
+		var plain = [], skip = [], run = [];
+		for (var k = 0; k < items.length; k++) {
+			if (hasDiff(items[k])) {
+				addSkip(items[k], run, plain, skip, newSkip);
+				run = [];
+			} else {
+				run.push(items[k]);
+			}
+		}
+		addSkip(null, run, plain, skip, newSkip);  // 末尾に残った同じ行
+		return { plain:plain, skip:skip };
+	}
+	function addSkip(before, run, plain, skip, newSkip) {
+		if (!run.length) { return }
+		for (var i = 0; i < run.length; i++) { plain.push(run[i]) }
+		var el = newSkip(run.length);
+		el.title = SKIP_HINT;
+		el.style.display = 'none';
+		el.onclick = skipClick(el, run);
+		if (before) {
+			before.parentNode.insertBefore(el, before);
+		} else {
+			run[run.length - 1].parentNode.appendChild(el);
+		}
+		skip.push(el);
+	}
+	function skipClick(el, run) {
 		return function(){
 			for (var i = 0; i < run.length; i++) { run[i].style.display = '' }
-			tr.style.display = 'none';
+			el.style.display = 'none';
 		};
 	}
 	var THEME_DARK  = '深色主题';
@@ -576,8 +772,13 @@ my $html = <<"--EOS--" ;
 		try { saved = localStorage.getItem('difffTheme') } catch (e) {}
 		applyTheme(saved == 'dark');
 	}
+	function setMergedPlain(plain) {  // 1列表示を白黒（印刷向け）にする
+		var m = document.getElementById('merged');
+		if (m) { m.className = plain ? 'plain' : '' }
+	}
 	function setColor1() {
 		document.getElementById('top').style.borderTop = '5px solid #00BBFF';
+		setMergedPlain(false);
 		var emList = document.getElementsByTagName('em');
 		for (i = 0; i < emList.length; i++) {
 			emList[i].className = 'blue' ;
@@ -585,6 +786,7 @@ my $html = <<"--EOS--" ;
 	}
 	function setColor2() {
 		document.getElementById('top').style.borderTop = '5px solid #00bb00';
+		setMergedPlain(false);
 		var emList = document.getElementsByTagName('em');
 		for (i = 0; i < emList.length; i++) {
 			emList[i].className = 'green' ;
@@ -592,6 +794,7 @@ my $html = <<"--EOS--" ;
 	}
 	function setColor3() {
 		document.getElementById('top').style.borderTop = '5px solid black';
+		setMergedPlain(true);
 		var emList = document.getElementsByTagName('em');
 		for (i = 0; i < emList.length; i++) {
 			emList[i].className = 'black' ;
@@ -662,6 +865,49 @@ my $html = <<"--EOS--" ;
 		background:#FAFAFA;
 		cursor:pointer;
 	}
+	#merged {
+		width:95%;
+		margin:20px;
+		font-size:10pt;
+		line-height:1.8;
+	}
+	#mergedhint {
+		margin-bottom:8px;
+	}
+	#mergedtext {
+		white-space:pre-wrap;
+		word-wrap:break-word;
+		overflow-wrap:anywhere;
+	}
+	#mergedtext .mskip {
+		display:block;
+		padding:2px 15px;
+		color:gray;
+		font-size:9pt;
+		text-align:center;
+		background:#FAFAFA;
+		cursor:pointer;
+	}
+	#merged del {
+		color:#A00000;
+		background:#FFDDDD;
+		border:solid 1px #FFAAAA;
+		text-decoration:line-through;
+	}
+	#merged ins {
+		color:#006600;
+		background:#CCFFCC;
+		border:solid 1px #66CC66;
+		text-decoration:none;
+	}
+	#merged.plain del,
+	#merged.plain ins {
+		color:black;
+		background:none;
+		border:none;
+	}
+	#merged.plain del { text-decoration:line-through }
+	#merged.plain ins { text-decoration:underline }
 	table#passwd {
 		width:auto;
 		border:dotted 1px #8c93ba;
@@ -681,6 +927,7 @@ my $html = <<"--EOS--" ;
 	body.dark table { color:#DDDDDD }  /* 互換モードでは table が body から色を継承しない */
 	body.dark td { border-left-color:#444444; border-right-color:#444444 }
 	body.dark td.skip { background:#262626; color:#888888 }
+	body.dark #mergedtext .mskip { background:#262626; color:#888888 }
 	body.dark #diffnav { background:#2A2A2A; border-bottom-color:#444444 }
 	body.dark #diffnav.same {
 		background:#99EEFF;
@@ -688,6 +935,22 @@ my $html = <<"--EOS--" ;
 		color:black;
 	}
 	body.dark table#passwd { border-color:#666688 }
+	body.dark #merged del {
+		color:#FFBBBB;
+		background:#4A2020;
+		border-color:#7A3838;
+	}
+	body.dark #merged ins {
+		color:#AAFFAA;
+		background:#1E3D1E;
+		border-color:#3A6E3A;
+	}
+	body.dark #merged.plain del,
+	body.dark #merged.plain ins {
+		color:#DDDDDD;
+		background:none;
+		border:none;
+	}
 -->
 </style>
 </head>
