@@ -52,6 +52,12 @@ utf8::decode($sequenceB) ;  # utf8フラグを有効にする
 # 「忽略空行」の指定
 my $ignoreblank = $query{'ignoreblank'} ? 1 : 0 ;
 
+# 「忽略大小写」の指定
+my $ignorecase = $query{'ignorecase'} ? 1 : 0 ;
+
+# 「忽略行首尾空白」の指定
+my $trimspace = $query{'trimspace'} ? 1 : 0 ;
+
 # 両方とも空欄のときはトップページを表示
 $sequenceA eq '' and $sequenceB eq '' and print_html() ;
 
@@ -60,10 +66,18 @@ $sequenceA eq '' and $sequenceB eq '' and print_html() ;
 (length($sequenceA) > $maxchar or length($sequenceB) > $maxchar) and
 	print_html("ERROR : Text too large to compare (about $maxtoken characters / words per side at most). Please shorten it and try again.") ;
 
-# 比較には空行を除いた写しを使い、
+# 比較には空行・行頭行末の空白を除いた写しを使い、
 # フォームには入力されたままのテキストを残す
-my $compareA = $ignoreblank ? strip_blank($sequenceA) : $sequenceA ;
-my $compareB = $ignoreblank ? strip_blank($sequenceB) : $sequenceB ;
+my $compareA = $sequenceA ;
+my $compareB = $sequenceB ;
+if ($trimspace){    # 先に行頭・行末の空白を落とし、
+	$compareA = trim_line($compareA) ;
+	$compareB = trim_line($compareB) ;
+}
+if ($ignoreblank){  # そのあと空行を落とす
+	$compareA = strip_blank($compareA) ;
+	$compareB = strip_blank($compareB) ;
+}
 
 my @a_split = split_text( escape_char($compareA) ) ;
 my @b_split = split_text( escape_char($compareB) ) ;
@@ -90,6 +104,8 @@ fifo_send($b_split, $fifopath_b) ;
 my @diffout = do {
 	my $n = (@a_split > @b_split) ? scalar @a_split : scalar @b_split ;
 	my $opt = ($n > $minimallimit) ? '' : '-d' ;
+	# 「忽略大小写」: 1トークンが1行になっているので diff -i をそのまま使える
+	$ignorecase and $opt .= ' -i' ;
 	`$diffcmd $opt $fifopath_a $fifopath_b` ;
 } ;
 my @diffsummary = grep /(^[^<>-]|<\$>)/, @diffout ;
@@ -184,11 +200,13 @@ foreach (@diffsummary){  # 異なる部分をハイライト表示
 		$b_split[$b_start - 1] = "<span class=dm id=B$diffcount></span><em>" . ($b_split[$b_start - 1] // '') ;
 		$b_split[$b_end - 1]  .= '</em>' ;
 	} elsif ($_ =~ /> <\$>/){  # 改行の数をあわせる処理
+		# 桁あわせで挿入する空行には <P> の目印をつける。行番号を振るときに
+		# 本文の行と区別するため（<,> は実体参照になっているので入力とは衝突しない）
 		my $i = ($a_start > 1) ? $a_start - 2 : 0 ;
-		while ($i < @a_split and not $a_split[$i] =~ s/<\$>/<\$><\$>/){ $i ++ }
+		while ($i < @a_split and not $a_split[$i] =~ s/<\$>/<\$><P><\$>/){ $i ++ }
 	} elsif ($_ =~ /< <\$>/){  # 改行の数をあわせる処理
 		my $i = ($b_start > 1) ? $b_start - 2 : 0 ;
-		while ($i < @b_split and not $b_split[$i] =~ s/<\$>/<\$><\$>/){ $i ++ }
+		while ($i < @b_split and not $b_split[$i] =~ s/<\$>/<\$><P><\$>/){ $i ++ }
 	}
 }
 # ▲ 差分の検出とHTMLタグの埋め込み
@@ -207,16 +225,23 @@ balance_tag(\@b_final, 'em') ;
 
 my $par = (@a_final > @b_final) ? @a_final : @b_final ;
 
+# 行番号は桁あわせで挿入した空行（<P>）を飛ばして振る
+my $a_lineno = 0 ;
+my $b_lineno = 0 ;
+
 my $table = '' ;
 foreach (0..$par-1){
 	defined $a_final[$_] or $a_final[$_] = '' ;
 	defined $b_final[$_] or $b_final[$_] = '' ;
 	$a_final[$_] =~ s{(\ +</em>)}{escape_space($1)}ge ;
 	$b_final[$_] =~ s{(\ +</em>)}{escape_space($1)}ge ;
+	# s///g は目印を消しつつ、あったかどうかも返す
+	my $a_no = ($a_final[$_] =~ s/<P>//g) ? '' : ++ $a_lineno ;
+	my $b_no = ($b_final[$_] =~ s/<P>//g) ? '' : ++ $b_lineno ;
 	$table .=
 "<tr>
-	<td>$a_final[$_]</td>
-	<td>$b_final[$_]</td>
+	<td class=ln>$a_no</td><td>$a_final[$_]</td>
+	<td class=ln>$b_no</td><td>$b_final[$_]</td>
 </tr>
 " ;
 }
@@ -227,14 +252,15 @@ my ($count1_B, $count2_B, $count3_B, $wcount_B) = count_char($compareB) ;
 
 my $counts = <<"--EOS--" ;
 <table id=charcount cellspacing=0>
+<colgroup><col class=lncol><col><col class=lncol><col></colgroup>
 <tr>
-	<td><font color=gray>
+	<td class=ln></td><td><font color=gray>
 		$wcount_A words<br>
 		$count1_A chars<br>
 		@{[$count2_A - $count1_A]} spaces (sum: $count2_A chars)<br>
 		@{[$count3_A - $count2_A]} linefeeds (sum: $count3_A chars)
 	</font></td>
-	<td><font color=gray>
+	<td class=ln></td><td><font color=gray>
 		$wcount_B words<br>
 		$count1_B chars<br>
 		@{[$count2_B - $count1_B]} spaces (sum: $count2_B chars)<br>
@@ -256,11 +282,15 @@ my $navbar = $diffcount ?
 --><label for=onlydiff>only show lines with differences</label>
 &emsp;<input type=checkbox id=mergeview onclick='toggleMerge(this)'><!--
 --><label for=mergeview>merge into one column</label>
+&emsp;<input type=checkbox id=showln checked onclick='toggleLineNo(this)'><!--
+--><label for=showln>show line numbers</label>
 <font color=gray size=1>&emsp;you can also press n / p</font>
 </div>
 " :
 "<div id=diffnav class=same>
 <b>No difference found (the two texts are identical)</b>
+&emsp;<input type=checkbox id=showln checked onclick='toggleLineNo(this)'><!--
+--><label for=showln>show line numbers</label>
 </div>
 " ;
 #- △ 差分の総数と移動ボタンを生成
@@ -272,6 +302,7 @@ my $merged_block = $diffcount ?
 my $message = <<"--EOS--" ;
 <div id=result>
 $navbar<table id=difftable cellspacing=0>
+<colgroup><col class=lncol><col><col class=lncol><col></colgroup>
 $table</table>
 $merged_block$counts
 <p>
@@ -347,7 +378,9 @@ my $text = join('', @_) // '' ;
 $text =~ s/\n/<\$>/g ;  # もともとの改行を <$> に変換して処理
 # 先頭から1トークンずつ s/// で削るとテキスト長の2乗に比例して遅くなるため、
 # \G で順にマッチさせて一度に取り出す（大きなテキストへの対応）
-return $text =~ /\G([a-z]+|<\$>|&\#?\w+;|.)/gs ;
+# 大文字を含む単語も1トークンにする（[a-z]+ だと The が T と he に分かれ、
+# 「忽略大小写」で大文字始まりの単語が一致しなくなる）
+return $text =~ /\G([a-zA-Z]+|<\$>|&\#?\w+;|.)/gs ;
 } ;
 # ====================
 sub strip_blank {  # 空行（空白だけの行を含む）を取り除く
@@ -355,6 +388,13 @@ my $text = $_[0] // '' ;
 my $lf = ($text =~ /\n\z/) ? "\n" : '' ;  # 末尾の改行は保つ
 my @line = grep { /\S/ } split /\n/, $text, -1 ;
 return @line ? join("\n", @line) . $lf : '' ;
+} ;
+# ====================
+sub trim_line {  # 各行の行頭・行末の空白（全角スペース等も含む）を取り除く
+my $text = $_[0] // '' ;
+$text =~ s/^\h+//mg ;
+$text =~ s/[\h\r]+$//mg ;  # CRLF の CR もここで落とす
+return $text ;
 } ;
 # ====================
 sub balance_tag {  # 行をまたぐタグを、行ごとに閉じて開き直す
@@ -571,7 +611,9 @@ my $html = <<"--EOS--" ;
 		var cur   = [null, null];
 		for (var r = 0; r < table.rows.length; r++) {
 			var cells = table.rows[r].cells;
-			for (var c = 0; c < cells.length && c < 2; c++) {
+			var col = 0;  // 行番号のセルは飛ばし、左右の本文セルだけ見る
+			for (var c = 0; c < cells.length && col < 2; c++) {
+				if (cells[c].className == 'ln') { continue }
 				var nodes = cells[c].getElementsByTagName('*');
 				for (var i = 0; i < nodes.length; i++) {
 					var el = nodes[i];
@@ -581,12 +623,13 @@ my $html = <<"--EOS--" ;
 							byNum[n] = { num:n, ems:[], mark:el, topEm:null };
 							diffs.push(byNum[n]);
 						}
-						cur[c] = byNum[n];
-					} else if (el.tagName.toLowerCase() == 'em' && cur[c]) {
-						cur[c].ems.push(el);
-						if (!cur[c].topEm) { cur[c].topEm = el }
+						cur[col] = byNum[n];
+					} else if (el.tagName.toLowerCase() == 'em' && cur[col]) {
+						cur[col].ems.push(el);
+						if (!cur[col].topEm) { cur[col].topEm = el }
 					}
 				}
+				col++;
 			}
 		}
 		diffs.sort(function(x, y){ return x.num - y.num });
@@ -655,6 +698,7 @@ my $html = <<"--EOS--" ;
 		}
 	}
 	function toggleMerge(box) {  // 2列表示と1列表示を切り替える
+		saveOpt(box);
 		var m = document.getElementById('merged');
 		var t = document.getElementById('difftable');
 		if (!m || !t) { return }
@@ -691,6 +735,7 @@ my $html = <<"--EOS--" ;
 	var mergedSkips = null;   // 1列表示分
 
 	function toggleOnlyDiff(box) {
+		saveOpt(box);
 		var v = mergedOn ? mergedSkipData() : tableSkipData();
 		if (!v) { return }
 		for (var i = 0; i < v.plain.length; i++) {
@@ -728,7 +773,7 @@ my $html = <<"--EOS--" ;
 	}
 	function newSkipRow(n) {
 		var td = document.createElement('td');
-		td.colSpan   = 2;
+		td.colSpan   = 4;  // 行番号セルの分
 		td.className = 'skip';
 		td.innerHTML = SKIP_TEXT_A + n + SKIP_TEXT_B;
 		var tr = document.createElement('tr');
@@ -792,11 +837,128 @@ my $html = <<"--EOS--" ;
 		try { saved = localStorage.getItem('difffTheme') } catch (e) {}
 		applyTheme(saved == 'dark');
 	}
+	var MAXFILESIZE      = 10485760;  // 10MB
+	var FILE_TOOBIG      = 'The file is too large. Please choose a smaller one.';
+	var FILE_READERROR   = 'Failed to read the file.';
+	var FILE_UNSUPPORTED = 'This browser cannot read local files.';
+
+	function lsGet(key, def) {
+		try {
+			var v = localStorage.getItem(key);
+			return (v === null) ? def : v;
+		} catch (e) { return def }
+	}
+	function lsSet(key, val) {
+		try { localStorage.setItem(key, val) } catch (e) {}
+	}
+	function saveOpt(box) { lsSet('difff_' + box.id, box.checked ? '1' : '0') }
+	function getOpt(id, def) { return lsGet('difff_' + id, def) == '1' }
+
+	function toggleLineNo(box) {  // 行番号の表示・非表示
+		saveOpt(box);
+		var cls = box.checked ? '' : 'noln';
+		var t = document.getElementById('difftable');
+		var c = document.getElementById('charcount');
+		if (t) { t.className = cls }
+		if (c) { c.className = cls }
+	}
+	function initOptions() {  // 前回の選択を復元する
+		if (!document.getElementById('result')) {
+			// トップページ: 入力オプションを復元する
+			restoreBox('ignoreblank');
+			restoreBox('ignorecase');
+			restoreBox('trimspace');
+			return;
+		}
+		// 結果ページ: 入力オプションはサーバが返した状態のままにし、表示だけ復元する
+		var ln = document.getElementById('showln');
+		if (ln) { ln.checked = getOpt('showln', '1'); toggleLineNo(ln) }
+		var mg = document.getElementById('mergeview');
+		if (mg && getOpt('mergeview', '0')) { mg.checked = true; toggleMerge(mg) }
+		var od = document.getElementById('onlydiff');
+		if (od && getOpt('onlydiff', '0')) { od.checked = true; toggleOnlyDiff(od) }
+		restoreColor(lsGet('difff_color', '1'));
+	}
+	function restoreBox(id) {
+		var box = document.getElementById(id);
+		if (box) { box.checked = getOpt(id, '0') }
+	}
+	function restoreColor(color) {
+		if (color == '1') { return }
+		var list = document.getElementsByName('color');
+		for (var i = 0; i < list.length; i++) {
+			if (list[i].value == color) { list[i].checked = true }
+		}
+		if (color == '2') { setColor2() } else if (color == '3') { setColor3() }
+	}
+	function initFileDrop() {  // テキストエリアへのファイルのドロップを受け付ける
+		var ids = ['sequenceA', 'sequenceB'];
+		for (var i = 0; i < ids.length; i++) {
+			var ta = document.getElementById(ids[i]);
+			if (!ta) { continue }
+			if (!window.FileReader) {  // 読み込めないブラウザではボタンを隠す
+				var f = document.getElementById(i ? 'fileB' : 'fileA');
+				if (f && f.parentNode) { f.parentNode.style.display = 'none' }
+				continue;
+			}
+			ta.ondragover  = dragOver;
+			ta.ondragenter = dragOver;
+			ta.ondragleave = dragEnd;
+			ta.ondrop      = dropFile;
+		}
+	}
+	function hasFiles(e) {  // ファイルのドロップかどうか
+		var dt = e.dataTransfer;
+		if (!dt) { return false }
+		if (dt.files && dt.files.length) { return true }
+		var t = dt.types;
+		if (!t) { return false }
+		for (var i = 0; i < t.length; i++) { if (t[i] == 'Files') { return true } }
+		return false;
+	}
+	function stopEvent(e) {
+		if (e.preventDefault) { e.preventDefault() } else { e.returnValue = false }
+	}
+	function dragOver(e) {
+		e = e || window.event;
+		if (!hasFiles(e)) { return true }  // 文字のドロップは既定の動作にまかせる
+		stopEvent(e);
+		(e.target || e.srcElement).className = 'dragover';
+		return false;
+	}
+	function dragEnd(e) {
+		e = e || window.event;
+		(e.target || e.srcElement).className = '';
+		return true;
+	}
+	function dropFile(e) {
+		e = e || window.event;
+		var ta = e.target || e.srcElement;
+		ta.className = '';
+		if (!hasFiles(e)) { return true }
+		stopEvent(e);
+		readFile(e.dataTransfer.files[0], ta);
+		return false;
+	}
+	function pickFile(input, id) {
+		var ta = document.getElementById(id);
+		if (ta && input.files && input.files.length) { readFile(input.files[0], ta) }
+		input.value = '';  // 同じファイルを選び直したときも読み込めるようにする
+	}
+	function readFile(file, ta) {
+		if (!window.FileReader) { alert(FILE_UNSUPPORTED); return }
+		if (file.size > MAXFILESIZE) { alert(FILE_TOOBIG); return }
+		var reader = new FileReader();
+		reader.onload  = function(ev){ ta.value = ev.target.result };
+		reader.onerror = function(){ alert(FILE_READERROR) };
+		reader.readAsText(file, 'utf-8');
+	}
 	function setMergedPlain(plain) {  // 1列表示を白黒（印刷向け）にする
 		var m = document.getElementById('merged');
 		if (m) { m.className = plain ? 'plain' : '' }
 	}
 	function setColor1() {
+		lsSet('difff_color', '1');
 		document.getElementById('top').style.borderTop = '5px solid #00BBFF';
 		setMergedPlain(false);
 		var emList = document.getElementsByTagName('em');
@@ -805,6 +967,7 @@ my $html = <<"--EOS--" ;
 		}
 	}
 	function setColor2() {
+		lsSet('difff_color', '2');
 		document.getElementById('top').style.borderTop = '5px solid #00bb00';
 		setMergedPlain(false);
 		var emList = document.getElementsByTagName('em');
@@ -813,6 +976,7 @@ my $html = <<"--EOS--" ;
 		}
 	}
 	function setColor3() {
+		lsSet('difff_color', '3');
 		document.getElementById('top').style.borderTop = '5px solid black';
 		setMergedPlain(true);
 		var emList = document.getElementsByTagName('em');
@@ -821,27 +985,21 @@ my $html = <<"--EOS--" ;
 		}
 	}
 	function savehtml() {
-		var element1 = document.createElement('input');
-		element1.setAttribute('type', 'hidden');
-		element1.setAttribute('name', 'sequenceA');
-		element1.setAttribute('value', document.difff.sequenceA.value);
-		document.save.appendChild(element1);
-
-		var element2 = document.createElement('input');
-		element2.setAttribute('type', 'hidden');
-		element2.setAttribute('name', 'sequenceB');
-		element2.setAttribute('value', document.difff.sequenceB.value);
-		document.save.appendChild(element2);
-
-		if (document.difff.ignoreblank && document.difff.ignoreblank.checked) {
-			var element3 = document.createElement('input');
-			element3.setAttribute('type', 'hidden');
-			element3.setAttribute('name', 'ignoreblank');
-			element3.setAttribute('value', '1');
-			document.save.appendChild(element3);
+		addHidden('sequenceA', document.difff.sequenceA.value);
+		addHidden('sequenceB', document.difff.sequenceB.value);
+		var opt = ['ignoreblank', 'ignorecase', 'trimspace'];
+		for (var i = 0; i < opt.length; i++) {
+			var box = document.getElementById(opt[i]);
+			if (box && box.checked) { addHidden(opt[i], '1') }
 		}
-
 		return confirm('Are you shure you want to publish this page?\\n[OK] : Publish and move to the created public link.');
+	}
+	function addHidden(name, value) {
+		var el = document.createElement('input');
+		el.setAttribute('type', 'hidden');
+		el.setAttribute('name', name);
+		el.setAttribute('value', value);
+		document.save.appendChild(el);
 	}
 //-->
 </script>
@@ -882,9 +1040,27 @@ my $html = <<"--EOS--" ;
 	}
 	td {
 		padding:4px 15px;
+		vertical-align:top;
 		border-left:solid 1px silver;
 		border-right:solid 1px silver;
 	}
+	col.lncol { width:4.5em }
+	td.ln {
+		padding:4px 8px 4px 4px;
+		color:gray;
+		font-size:9pt;
+		text-align:right;
+		white-space:nowrap;
+		border-right:none;
+		-webkit-user-select:none;
+		user-select:none;
+	}
+	td.ln + td { border-left:none }
+	table.noln td.ln { display:none }
+	table.noln col.lncol { width:0 }
+	textarea.dragover { outline:2px dashed #00BBFF }
+	.fileline { margin-top:4px }
+	.fileline input { font-size:8pt }
 	td.skip {
 		padding:2px 15px;
 		color:gray;
@@ -962,6 +1138,7 @@ my $html = <<"--EOS--" ;
 		border-bottom-color:#00BBFF;
 		color:black;
 	}
+	body.dark td.ln { color:#888888 }
 	body.dark table#passwd { border-color:#666688 }
 	body.dark #merged del {
 		color:#FFBBBB;
@@ -983,7 +1160,7 @@ my $html = <<"--EOS--" ;
 </style>
 </head>
 
-<body onload='initTheme(); initDiffNav()'>
+<body onload='initTheme(); initDiffNav(); initFileDrop(); initOptions()'>
 <script type='text/javascript'>initTheme();</script>
 
 <div id=top style='border-top:5px solid #00BBFF; padding-top:10px'>
@@ -1012,14 +1189,22 @@ my $html = <<"--EOS--" ;
 <form method=POST id=difff name=difff action='$url'>
 <table cellspacing=0>
 <tr>
-	<td class=n><textarea name=sequenceA rows=20>$sequenceA</textarea></td>
-	<td class=n><textarea name=sequenceB rows=20>$sequenceB</textarea></td>
+	<td class=n><textarea name=sequenceA id=sequenceA rows=20>$sequenceA</textarea>
+		<div class=fileline><input type=file id=fileA onchange='pickFile(this, "sequenceA")'><!--
+		--><font color=gray size=1>or drop a file onto the box above</font></div></td>
+	<td class=n><textarea name=sequenceB id=sequenceB rows=20>$sequenceB</textarea>
+		<div class=fileline><input type=file id=fileB onchange='pickFile(this, "sequenceB")'><!--
+		--><font color=gray size=1>or drop a file onto the box above</font></div></td>
 </tr>
 </table>
 
 <p><input type=submit value='compare'>
-&emsp;<input type=checkbox name=ignoreblank id=ignoreblank value=1@{[$ignoreblank ? ' checked' : '']}><!--
---><label for=ignoreblank>ignore blank lines</label></p>
+&emsp;<input type=checkbox name=ignoreblank id=ignoreblank value=1@{[$ignoreblank ? ' checked' : '']} onclick='saveOpt(this)'><!--
+--><label for=ignoreblank>ignore blank lines</label><!--
+-->&emsp;<input type=checkbox name=ignorecase id=ignorecase value=1@{[$ignorecase ? ' checked' : '']} onclick='saveOpt(this)'><!--
+--><label for=ignorecase>ignore case</label><!--
+-->&emsp;<input type=checkbox name=trimspace id=trimspace value=1@{[$trimspace ? ' checked' : '']} onclick='saveOpt(this)'><!--
+--><label for=trimspace>ignore leading / trailing spaces</label></p>
 </form>
 </div>
 
