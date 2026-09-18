@@ -845,6 +845,8 @@ my $html = <<"--EOS--" ;
 	var FILE_TOOBIG      = '文件太大，请换一个更小的文件。';
 	var FILE_READERROR   = '读取文件失败。';
 	var FILE_UNSUPPORTED = '当前浏览器不支持读取本地文件。';
+	var FILE_NOTTEXT     = '这个文件看起来不是 UTF-8 文本，可能是二进制文件，或者用了 GBK 等其他编码。\\n仍然要读入吗？';
+	var CLEAR_CONFIRM    = '确定要清空两边的文本吗？';
 
 	function lsGet(key, def) {
 		try {
@@ -944,6 +946,37 @@ my $html = <<"--EOS--" ;
 		readFile(e.dataTransfer.files[0], ta);
 		return false;
 	}
+	function swapText() {  // 左右のテキストを入れ替える
+		var a = document.getElementById('sequenceA');
+		var b = document.getElementById('sequenceB');
+		if (!a || !b) { return }
+		var t = a.value; a.value = b.value; b.value = t;
+	}
+	function clearText() {  // 両方のテキストを消す
+		var a = document.getElementById('sequenceA');
+		var b = document.getElementById('sequenceB');
+		if (!a || !b) { return }
+		if ((a.value || b.value) && !confirm(CLEAR_CONFIRM)) { return }
+		a.value = '';
+		b.value = '';
+		a.focus();
+	}
+	function initSubmitKey() {  // Ctrl+Enter / Cmd+Enter で比較する
+		var ids = ['sequenceA', 'sequenceB'];
+		for (var i = 0; i < ids.length; i++) {
+			var ta = document.getElementById(ids[i]);
+			if (ta) { ta.onkeydown = submitKey }
+		}
+	}
+	function submitKey(e) {
+		e = e || window.event;
+		if (!e.ctrlKey && !e.metaKey) { return true }
+		var code = e.keyCode || e.which;
+		if (e.key != 'Enter' && code != 13 && code != 10) { return true }
+		stopEvent(e);
+		document.difff.submit();
+		return false;
+	}
 	function pickFile(input, id) {
 		var ta = document.getElementById(id);
 		if (ta && input.files && input.files.length) { readFile(input.files[0], ta) }
@@ -953,9 +986,24 @@ my $html = <<"--EOS--" ;
 		if (!window.FileReader) { alert(FILE_UNSUPPORTED); return }
 		if (file.size > MAXFILESIZE) { alert(FILE_TOOBIG); return }
 		var reader = new FileReader();
-		reader.onload  = function(ev){ ta.value = ev.target.result };
+		reader.onload  = function(ev){
+			var text = ev.target.result;
+			if (text.charCodeAt(0) == 0xFEFF) { text = text.substring(1) }  // BOM
+			if (looksBinary(text) && !confirm(FILE_NOTTEXT)) { return }
+			ta.value = text;
+		};
 		reader.onerror = function(){ alert(FILE_READERROR) };
 		reader.readAsText(file, 'utf-8');
+	}
+	function looksBinary(text) {  // UTF-8のテキストとして読めたかどうかの目安
+		var head = (text.length > 65536) ? text.substring(0, 65536) : text;
+		var bad  = 0;
+		for (var i = 0; i < head.length; i++) {
+			var c = head.charCodeAt(i);
+			if (c == 0) { return true }       // NUL があればバイナリとみなす
+			if (c == 0xFFFD) { bad ++ }       // UTF-8として解釈できなかった箇所
+		}
+		return (bad > 4) || (bad > 0 && bad > head.length * 0.01);
 	}
 	function setMergedPlain(plain) {  // 1列表示を白黒（印刷向け）にする
 		var m = document.getElementById('merged');
@@ -1173,7 +1221,7 @@ my $html = <<"--EOS--" ;
 </style>
 </head>
 
-<body onload='initTheme(); initDiffNav(); initFileDrop(); initOptions()'>
+<body onload='initTheme(); initDiffNav(); initFileDrop(); initSubmitKey(); initOptions()'>
 <script type='text/javascript'>initTheme();</script>
 
 <div id=top style='border-top:5px solid #00BBFF; padding-top:10px'>
@@ -1203,16 +1251,19 @@ my $html = <<"--EOS--" ;
 <table cellspacing=0>
 <tr>
 	<td class=n><textarea name=sequenceA id=sequenceA rows=20>$sequenceA</textarea>
-		<div class=fileline><input type=file id=fileA onchange='pickFile(this, "sequenceA")'><!--
+		<div class=fileline><input type=file id=fileA accept='text/*,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.yml,.yaml,.log,.ini,.conf,.sql,.srt' onchange='pickFile(this, "sequenceA")'><!--
 		--><font color=gray size=1>也可以把文件拖到上面的框里</font></div></td>
 	<td class=n><textarea name=sequenceB id=sequenceB rows=20>$sequenceB</textarea>
-		<div class=fileline><input type=file id=fileB onchange='pickFile(this, "sequenceB")'><!--
+		<div class=fileline><input type=file id=fileB accept='text/*,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.yml,.yaml,.log,.ini,.conf,.sql,.srt' onchange='pickFile(this, "sequenceB")'><!--
 		--><font color=gray size=1>也可以把文件拖到上面的框里</font></div></td>
 </tr>
 </table>
 
 <p><input type=submit value='比较'>
-&emsp;<input type=checkbox name=ignoreblank id=ignoreblank value=1@{[$ignoreblank ? ' checked' : '']} onclick='saveOpt(this)'><!--
+<input type=button value='交换左右' onclick='swapText()'>
+<input type=button value='清空' onclick='clearText()'><!--
+--><font color=gray size=1>&emsp;Ctrl / ⌘ + Enter 也可以提交</font>
+<br><input type=checkbox name=ignoreblank id=ignoreblank value=1@{[$ignoreblank ? ' checked' : '']} onclick='saveOpt(this)'><!--
 --><label for=ignoreblank>忽略空行</label><!--
 -->&emsp;<input type=checkbox name=ignorecase id=ignorecase value=1@{[$ignorecase ? ' checked' : '']} onclick='saveOpt(this)'><!--
 --><label for=ignorecase>忽略大小写</label><!--
