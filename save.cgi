@@ -970,8 +970,16 @@ my $html = <<"--EOS--" ;
 		user-select:none;
 	}
 	td.ln + td { border-left:none }
-	table.noln td.ln { display:none }
+	/* 行番号を隠すときに display:none は使えない。セルが行から外れると
+	   あとのセルが1列ずつ前にずれ、本文が幅0の列に入ってしまう。
+	   セルは残したまま、幅と余白を0にして見えなくする */
 	table.noln col.lncol { width:0 }
+	table.noln td.ln {
+		padding:0;
+		border:none;
+		visibility:hidden;
+	}
+	table.noln td.ln + td { border-left:solid 1px silver }
 	textarea.dragover { outline:2px dashed #00BBFF }
 	.fileline { margin-top:4px }
 	.fileline input { font-size:8pt }
@@ -1053,6 +1061,7 @@ my $html = <<"--EOS--" ;
 		color:black;
 	}
 	body.dark td.ln { color:#888888 }
+	body.dark table.noln td.ln + td { border-left-color:#444444 }
 	body.dark table#passwd { border-color:#666688 }
 	body.dark #merged del {
 		color:#FFBBBB;
