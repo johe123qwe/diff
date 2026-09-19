@@ -854,7 +854,6 @@ my $html = <<"--EOS--" ;
 	var FILE_READERROR   = '读取文件失败。';
 	var FILE_UNSUPPORTED = '当前浏览器不支持读取本地文件。';
 	var FILE_NOTTEXT     = '这个文件看起来不是 UTF-8 文本，可能是二进制文件，或者用了 GBK 等其他编码。\\n仍然要读入吗？';
-	var CLEAR_CONFIRM    = '确定要清空两边的文本吗？';
 
 	function lsGet(key, def) {
 		try {
@@ -964,7 +963,6 @@ my $html = <<"--EOS--" ;
 		var a = document.getElementById('sequenceA');
 		var b = document.getElementById('sequenceB');
 		if (!a || !b) { return }
-		if ((a.value || b.value) && !confirm(CLEAR_CONFIRM)) { return }
 		a.value = '';
 		b.value = '';
 		a.focus();

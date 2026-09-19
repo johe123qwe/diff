@@ -779,7 +779,6 @@ my $html = <<"--EOS--" ;
 	var FILE_READERROR   = 'Failed to read the file.';
 	var FILE_UNSUPPORTED = 'This browser cannot read local files.';
 	var FILE_NOTTEXT     = 'This file does not look like UTF-8 text. It may be binary, or use another encoding such as GBK.\\nRead it anyway?';
-	var CLEAR_CONFIRM    = 'Clear both boxes?';
 
 	function lsGet(key, def) {
 		try {
@@ -889,7 +888,6 @@ my $html = <<"--EOS--" ;
 		var a = document.getElementById('sequenceA');
 		var b = document.getElementById('sequenceB');
 		if (!a || !b) { return }
-		if ((a.value || b.value) && !confirm(CLEAR_CONFIRM)) { return }
 		a.value = '';
 		b.value = '';
 		a.focus();
