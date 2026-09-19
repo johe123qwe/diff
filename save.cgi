@@ -241,12 +241,20 @@ foreach (0..$par-1){
 " ;
 }
 
+#- ▽ 行番号の列幅を桁数にあわせる
+# 桁数によらず固定幅にすると、数行しかない表で列が広くなりすぎる。
+# 幅はCSS変数で渡す。スタイルシート側の width と同じ強さになるので、
+# 行番号を隠すときの width:0 がそのまま効く（style属性で直接指定すると効かない）
+my $lndigits = length(($a_lineno > $b_lineno) ? $a_lineno : $b_lineno) || 1 ;
+my $lnwidth  = "calc(${lndigits}ch + 10px)" ;
+#- △ 行番号の列幅を桁数にあわせる
+
 #- ▽ 文字数をカウントしてtableに付加
 my ($count1_A, $count2_A, $count3_A, $wcount_A) = count_char($compareA) ;
 my ($count1_B, $count2_B, $count3_B, $wcount_B) = count_char($compareB) ;
 
 my $counts = <<"--EOS--" ;
-<table id=charcount cellspacing=0>
+<table id=charcount cellspacing=0 style='--lnw:$lnwidth'>
 <colgroup><col class=lncol><col><col class=lncol><col></colgroup>
 <tr>
 	<td class=ln></td><td><font color=gray>
@@ -296,7 +304,7 @@ my $merged_block = $diffcount ?
 
 my $message = <<"--EOS--" ;
 <div id=result>
-$navbar<table id=difftable cellspacing=0>
+$navbar<table id=difftable cellspacing=0 style='--lnw:$lnwidth'>
 <colgroup><col class=lncol><col><col class=lncol><col></colgroup>
 $table</table>
 $merged_block$counts
@@ -1006,9 +1014,15 @@ my $html = <<"--EOS--" ;
 		border-left:solid 1px silver;
 		border-right:solid 1px silver;
 	}
-	col.lncol { width:4.5em }
+	/* 幅は各ページが --lnw で渡す。変数を解釈できない環境では前者が残る */
+	/* 幅の変化にアニメーションはつけない。table-layout:fixed の列幅を
+	   動かすと毎フレーム表全体を組み直すことになり、大きな差分で固まる */
+	col.lncol {
+		width:2.2em;
+		width:var(--lnw, 2.2em);
+	}
 	td.ln {
-		padding:4px 8px 4px 4px;
+		padding:4px 5px 4px 5px;
 		color:gray;
 		font-size:9pt;
 		text-align:right;
