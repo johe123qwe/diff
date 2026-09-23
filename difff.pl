@@ -393,9 +393,11 @@ return $text =~ /\G([a-zA-Z]+|<\$>|&\#?\w+;|.)/gs ;
 # ====================
 sub strip_blank {  # 空行（空白だけの行を含む）を取り除く
 my $text = $_[0] // '' ;
-my $lf = ($text =~ /\n\z/) ? "\n" : '' ;  # 末尾の改行は保つ
-my @line = grep { /\S/ } split /\n/, $text, -1 ;
-return @line ? join("\n", @line) . $lf : '' ;
+# 末尾の改行は付けない。片方だけ末尾に改行があると、
+# 最終行のあとの空行が差分として残ってしまうため。
+# 改行は CRLF もまとめて LF にそろえる（末尾の CR が差分にならないように）
+my @line = grep { /\S/ } split /\r?\n/, $text, -1 ;
+return join("\n", @line) ;
 } ;
 # ====================
 sub trim_line {  # 各行の行頭・行末の空白（全角スペース等も含む）を取り除く
